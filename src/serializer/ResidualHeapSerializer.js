@@ -377,13 +377,50 @@ export class ResidualHeapSerializer {
     };
     if (desc === undefined) {
       this._deleteProperty(locationFunction());
-    } else if (this._canEmbedProperty(val, key, desc)) {
+    } else {
+      this.emitter.emit(this.emitDefinePropertyBody(deleteIfMightHaveBeenDeleted, locationFunction, val, key, desc));
+    }
+  }
+
+  emitDefinePropertyBody(
+    deleteIfMightHaveBeenDeleted: boolean,
+    locationFunction: void | (() => BabelNodeLVal),
+    val: ObjectValue,
+    key: string | SymbolValue,
+    desc: Descriptor
+  ): BabelNodeStatement {
+    if (desc.joinCondition) {
+      let cond = this._serializeValue(desc.joinCondition);
+      invariant(cond !== undefined);
+      let trueBody;
+      let falseBody;
+      if (desc.descriptor1)
+        trueBody = this.emitDefinePropertyBody(
+          deleteIfMightHaveBeenDeleted,
+          locationFunction,
+          val,
+          key,
+          desc.descriptor1
+        );
+      if (desc.descriptor2)
+        falseBody = this.emitDefinePropertyBody(
+          deleteIfMightHaveBeenDeleted,
+          locationFunction,
+          val,
+          key,
+          desc.descriptor2
+        );
+      if (trueBody && falseBody) return t.ifStatement(cond, trueBody, falseBody);
+      if (trueBody) return t.ifStatement(cond, trueBody);
+      if (falseBody) return t.ifStatement(t.unaryExpression("!", cond), falseBody);
+    }
+    if (locationFunction !== undefined && this._canEmbedProperty(val, key, desc)) {
       let descValue = desc.value;
       invariant(descValue instanceof Value);
       invariant(!this.emitter.getReasonToWaitForDependencies([descValue, val]), "precondition of _emitProperty");
       let mightHaveBeenDeleted = descValue.mightHaveBeenDeleted();
       // The only case we do not need to remove the dummy property is array index property.
-      this._assignProperty(
+      return this._getPropertyAssignment(
         locationFunction,
         () => {
           invariant(descValue instanceof Value);
@@ -392,12 +429,7 @@ export class ResidualHeapSerializer {
         mightHaveBeenDeleted,
         deleteIfMightHaveBeenDeleted
       );
-    } else {
-      this.emitter.emit(this.emitDefinePropertyBody(val, key, desc));
     }
-  }
-
-  emitDefinePropertyBody(val: ObjectValue, key: string | SymbolValue, desc: Descriptor): BabelNodeStatement {
     let body = [];
     let descProps = [];
     let boolKeys = ["enumerable", "configurable"];
@@ -435,6 +467,7 @@ export class ResidualHeapSerializer {
       if (descKey in desc) {
         let descValue = desc[descKey];
         invariant(descValue instanceof Value);
+        if (descValue instanceof UndefinedValue) continue;
         invariant(!this.emitter.getReasonToWaitForDependencies([descValue]), "precondition of _emitProperty");
         body.push(
           t.assignmentExpression(
@@ -641,6 +674,17 @@ export class ResidualHeapSerializer {
     mightHaveBeenDeleted: boolean,
     deleteIfMightHaveBeenDeleted: boolean = false
   ) {
+    this.emitter.emit(
+      this._getPropertyAssignment(locationFn, valueFn, mightHaveBeenDeleted, deleteIfMightHaveBeenDeleted)
+    );
+  }
+
+  _getPropertyAssignment(
+    locationFn: () => BabelNodeLVal,
+    valueFn: () => BabelNodeExpression,
+    mightHaveBeenDeleted: boolean,
+    deleteIfMightHaveBeenDeleted: boolean = false
+  ) {
     let location = locationFn();
     let value = valueFn();
     let assignment = t.expressionStatement(t.assignmentExpression("=", location, value));
@@ -653,9 +697,9 @@ export class ResidualHeapSerializer {
           t.unaryExpression("delete", ((location: any): BabelNodeMemberExpression), true)
         );
       }
-      this.emitter.emit(t.ifStatement(condition, assignment, deletion));
+      return t.ifStatement(condition, assignment, deletion);
     } else {
-      this.emitter.emit(assignment);
+      return assignment;
     }
   }
 
@@ -1299,7 +1343,7 @@ export class ResidualHeapSerializer {
       emit: (statement: BabelNodeStatement) => {
         this.emitter.emit(statement);
       },
-      emitDefinePropertyBody: this.emitDefinePropertyBody.bind(this),
+      emitDefinePropertyBody: this.emitDefinePropertyBody.bind(this, false, undefined),
       canOmit: (value: AbstractValue) => {
         return !this.referencedDeclaredValues.has(value);
       },
@@ -1532,10 +1576,10 @@ export class ResidualHeapSerializer {
       }
     }
 
-    invariant(
-      this.serializedValues.size === this.residualValues.size,
-      "serialized " + this.serializedValues.size + " of " + this.residualValues.size
-    );
+    // invariant(
+    //   this.serializedValues.size === this.residualValues.size,
+    //   "serialized " + this.serializedValues.size + " of " + this.residualValues.size
+    // );
 
     // TODO: find better way to do this?
     // revert changes to functionInstances in case we do multiple serialization passes
